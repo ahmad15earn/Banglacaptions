@@ -1,0 +1,5 @@
+dist/
+stage/
+__pycache__/
+*.pyc
+*.bak

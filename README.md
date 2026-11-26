@@ -1,15 +1,16 @@
 <p align="center"><img src="assets/icon_128.png" width="96" alt="Bangla Caption"></p>
 
-# Bangla Caption  v0.3.0
+# Bangla Caption  v0.4.0
 
 Free, offline Bengali / Banglish caption panel for **Adobe After Effects** (Windows).
 Audio -> transcript -> caption blocks with your own word limit -> editable text layers. No cloud, no subscription.
 
 ## Install (বাংলায়)
-1. Zip এক্সট্র্যাক্ট করুন, **INSTALL.bat** ডাবল-ক্লিক করুন। প্রথমবার বড় ডাউনলোড হবে (Python থাকলে ভালো, না থাকলে winget দিয়ে বসাবে)।
-2. শেষে সেলফ-টেস্টের প্রতিটি লাইনে **OK** দেখতে হবে।
-3. After Effects রিস্টার্ট করুন, **Window > BanglaCaption.jsx**।
-4. প্যানেলের `?` বাটনে সেটআপ চেকলিস্ট আছে: AE-তে "Allow Scripts to Write Files and Access Network" টিক এবং Text Engine = **South Asian and Middle Eastern**। Hind Siliguri / Noto Sans Bengali ফন্ট ইন্সটল রাখুন।
+**GitHub থেকে (সহজ):** repository-তে push করুন -> **Actions** ট্যাবে Build শেষ হলে artifact **BanglaCaption** ডাউনলোড করুন -> ভেতরের `BanglaCaption-Setup-x.y.z.exe` চালান (Windows SmartScreen সতর্ক করলে "More info > Run anyway", কারণ ফাইল সাইন করা নেই)। ইনস্টলার প্যানেল বসায়, Python/ইঞ্জিন সেটআপ করে ও সেলফ-টেস্ট দেখায়।
+**ট্যাগ দিলে** (`git tag v0.4.0 && git push --tags`) Releases পেজে ডাউনলোড লিংক তৈরি হয়।
+**পোর্টেবল:** `BanglaCaption-portable-x.y.z.zip` extract করে `INSTALL.bat` চালান।
+
+তারপর After Effects রিস্টার্ট করে **Window > BanglaCaption.jsx**। প্যানেলের `?` বাটনে চেকলিস্ট আছে: "Allow Scripts to Write Files and Access Network" টিক, Text Engine = **South Asian and Middle Eastern**, Hind Siliguri / Noto Sans Bengali ফন্ট, তারপর **Test Bengali** বাটনে যুক্তাক্ষর যাচাই।
 
 ## Use
 1. Select a footage layer with audio -> **Selected layer** (or **Browse file**).
@@ -28,10 +29,9 @@ Audio -> transcript -> caption blocks with your own word limit -> editable text 
 `INSTALL.bat` / `UNINSTALL.bat` - one-click setup and removal. `panel/` - the AE panel. `worker/` - local speech worker. `assets/` - icons. `tools/` - helpers.
 
 ## Honest status
-- Not yet tested inside After Effects 2024-2027 by the author. Unit-tested only: caption splitting and Banglish conversion.
-- Unverified until first run: progress polling (use "Check progress" if the bar does not move), the font check, the automatic scripting-permission patch (falls back to the manual setting), Bengali shaping in AE.
-- Audio must come from a footage file layer (no pre-comp audio). Time-remapped layers are not handled.
-- Banglish is rule-based and approximate.
-- Editor: keep the line count; Regroup discards edits.
-- A ScriptUI panel cannot show a custom tab icon in AE; the icon appears in the panel header and installer assets.
-- Check model licenses before redistributing models. Log of last run: `%TEMP%\BanglaCaption\log.txt`.
+- Automated tests cover caption splitting, editor mapping, Banglish and versions. The AE panel itself, the installer build and the speech engines have not been run by the author inside After Effects 2024-2027; report problems as GitHub issues with the self-test output and `%TEMP%\BanglaCaption\log.txt`.
+- Unverified until first run: progress polling (use "Check progress" if the bar does not move), the `app.fonts` font check, the automatic scripting-permission patch (falls back to the manual setting).
+- Pre-comp support uses the first audio footage layer found; mixed audio from several layers is not captured. Time-remapped layers are not applied (a warning is shown).
+- Banglish is rule-based and approximate. BanglaSpeech2Text word times are estimated inside each segment; choose Whisper for exact word timing.
+- A ScriptUI panel cannot show a custom tab icon in AE; the icon is in the panel header and installer.
+- The installer is unsigned. Check model licenses before redistributing models.

@@ -1,4 +1,4 @@
-// BanglaCaption.jsx - Bangla Caption v0.3.0, dockable ScriptUI panel for After Effects
+// BanglaCaption.jsx - Bangla Caption v0.4.0, dockable ScriptUI panel for After Effects
 // License: MIT. Local speech recognition (Whisper / BanglaSpeech2Text), no cloud.
 // Keep this file ASCII-only (ExtendScript reads source as ANSI unless it has a BOM).
 // Bengali text only ever arrives from JSON files as \uXXXX escapes.
@@ -75,13 +75,55 @@ function bcBuildBlocks(words, maxWords, gapSec) {
             blocks.push({ text: txt.join(" "), s: ch[0].s, e: ch[ch.length - 1].e });
         }
     }
+    return bcFixTiming(blocks);
+}
+
+function bcFixTiming(blocks) {
+    var i, b, exact = blocks.exact;
     for (i = 0; i < blocks.length; i++) {
         b = blocks[i];
         if (b.e < b.s + 0.4) b.e = b.s + 0.4;                      // minimum on-screen time
         if (i < blocks.length - 1 && b.e > blocks[i + 1].s)        // no overlap with next caption
             b.e = Math.max(blocks[i + 1].s, b.s + 0.05);
     }
+    blocks.exact = exact;
     return blocks;
+}
+
+// Edited editor lines -> blocks. Lines may be merged, split, added or removed.
+// If the total word count is unchanged, every word keeps its own timestamp (exact).
+// Otherwise timing is spread over the speech in proportion to text length (estimated).
+function bcLinesToBlocks(lines, words) {
+    var rows = [], total = 0, totalChars = 0, i, k, parts, line, len, idx = 0, cum = 0;
+    var blocks = [], t0, t1, s, e;
+    for (i = 0; i < lines.length; i++) {
+        line = bcTrim(lines[i]);
+        if (line === "") continue;
+        parts = line.split(/\s+/);
+        rows.push(parts);
+        total += parts.length;
+        for (k = 0; k < parts.length; k++) totalChars += parts[k].length;
+    }
+    blocks.exact = false;
+    if (!rows.length || !words.length) return blocks;
+    if (total === words.length) {
+        for (i = 0; i < rows.length; i++) {
+            blocks.push({ text: rows[i].join(" "), s: words[idx].s, e: words[idx + rows[i].length - 1].e });
+            idx += rows[i].length;
+        }
+        blocks.exact = true;
+    } else {
+        t0 = words[0].s; t1 = words[words.length - 1].e;
+        for (i = 0; i < rows.length; i++) {
+            len = 0;
+            for (k = 0; k < rows[i].length; k++) len += rows[i][k].length;
+            s = t0 + (t1 - t0) * cum / totalChars;
+            cum += len;
+            e = t0 + (t1 - t0) * cum / totalChars;
+            blocks.push({ text: rows[i].join(" "), s: s, e: e });
+        }
+    }
+    return bcFixTiming(blocks);
 }
 // ---SEG-END---
 
@@ -116,7 +158,7 @@ function bcJsonStr(s) {  // ASCII-only JSON string literal
     return out + "\"";
 }
 
-var BC_VERSION = "0.3.0";
+var BC_VERSION = "0.4.0";
 function bcAssetFile(name) { return new File(bcDataDir().fsName + "/assets/" + name); }
 function bcEnvReady() {
     return new File(bcDataDir().fsName + "/venv/Scripts/python.exe").exists &&
@@ -129,6 +171,25 @@ function bcGetSetting(k, def) {
 function bcSetSetting(k, v) { try { app.settings.saveSetting("BanglaCaption", k, String(v)); } catch (e) { } }
 
 function bcDataDir() { return new Folder(Folder.userData.fsName + "/BanglaCaption"); }
+// First audio footage layer in a comp, searching nested pre-comps. Offsets/stretch are composed.
+function bcFindAudio(comp, depth) {
+    var i, ly, r;
+    for (i = 1; i <= comp.numLayers; i++) {
+        ly = comp.layer(i);
+        if (!(ly instanceof AVLayer) || !ly.source) continue;
+        try { if (!ly.audioEnabled) continue; } catch (e) { }
+        if (ly.source.file && ly.hasAudio) {
+            return { path: ly.source.file.fsName, offset: ly.startTime, stretch: ly.stretch, name: ly.name };
+        }
+        if (ly.source instanceof CompItem && depth < 4) {
+            r = bcFindAudio(ly.source, depth + 1);
+            if (r) return { path: r.path, offset: ly.startTime + r.offset * ly.stretch / 100,
+                            stretch: r.stretch * ly.stretch / 100, name: ly.name + " > " + r.name };
+        }
+    }
+    return null;
+}
+
 function bcJobDir() { var f = new Folder(Folder.temp.fsName + "/BanglaCaption"); if (!f.exists) f.create(); return f; }
 
 // ---- global state + poller (scheduleTask runs code in the global scope) ----
@@ -209,9 +270,9 @@ $.global.BC_poll = function () {
         pAudio.alignChildren = ["fill", "top"]; pAudio.margins = [8, 14, 8, 8]; pAudio.spacing = 4;
         ui.src = pAudio.add("statictext", undefined, "No audio selected", { truncate: "middle" });
         var rA = pAudio.add("group"); rA.alignChildren = ["left", "center"]; rA.spacing = 4;
-        ui.btnSel = rA.add("button", undefined, "Selected layer");
+        ui.btnSel = rA.add("button", undefined, "Use selection");
         ui.btnBrowse = rA.add("button", undefined, "Browse file...");
-        ui.btnSel.helpTip = "Use the audio of the footage layer selected in the active composition (keeps timing in sync).";
+        ui.btnSel.helpTip = "Use the selected footage or pre-comp layer (or the first audio layer of the active comp). Keeps timing in sync.";
         ui.btnBrowse.helpTip = "Pick any audio/video file. Captions then start at the time offset below.";
 
         // 2. Transcript
@@ -259,7 +320,7 @@ $.global.BC_poll = function () {
         ui.editor = pGrp.add("edittext", undefined, "", { multiline: true, scrolling: true });
         ui.editor.preferredSize = [260, 130];
         ui.editor.alignment = ["fill", "fill"];
-        ui.info = pGrp.add("statictext", undefined, "One line = one caption. Edit text freely; keep the line count.", { truncate: "end" });
+        ui.info = pGrp.add("statictext", undefined, "One line = one caption. You can edit, merge or split lines.", { truncate: "end" });
 
         // 4. Text and layers
         var pSty = w.add("panel", undefined, "4. Text and layers");
@@ -281,7 +342,10 @@ $.global.BC_poll = function () {
         var rO = pSty.add("group"); rO.alignChildren = ["left", "center"]; rO.spacing = 4;
         rO.add("statictext", undefined, "Time offset (s)");
         ui.offset = rO.add("edittext", undefined, "0"); ui.offset.characters = 5;
-        ui.btnCreate = pSty.add("button", undefined, "Create Captions in Comp");
+        var rB = pSty.add("group"); rB.alignChildren = ["left", "center"]; rB.spacing = 4;
+        ui.btnCreate = rB.add("button", undefined, "Create Captions in Comp");
+        ui.btnTest = rB.add("button", undefined, "Test Bengali");
+        ui.btnTest.helpTip = "Adds one sample text layer with conjuncts so you can check the font and Text Engine setting. Delete it afterwards.";
 
         // ---- saved settings ----
         function loadPrefs() {
@@ -334,16 +398,28 @@ $.global.BC_poll = function () {
         ui.btnSel.onClick = function () {
             var comp = activeComp();
             if (!comp) { alert("Open a composition first."); return; }
-            if (comp.selectedLayers.length !== 1) { alert("Select exactly one footage layer that contains the audio."); return; }
-            var ly = comp.selectedLayers[0];
-            if (!(ly instanceof AVLayer) || !ly.source || !ly.source.file || !ly.hasAudio) {
-                alert("The selected layer must be a footage layer (audio or video file) with audio.\nPre-comps are not supported yet: select the original file layer.");
-                return;
+            var r = null, ly, note = "";
+            if (comp.selectedLayers.length > 1) { alert("Select one layer (or none to use the first audio layer of the composition)."); return; }
+            if (comp.selectedLayers.length === 1) {
+                ly = comp.selectedLayers[0];
+                if (ly instanceof AVLayer && ly.source && ly.source.file && ly.hasAudio) {
+                    r = { path: ly.source.file.fsName, offset: ly.startTime, stretch: ly.stretch, name: ly.name };
+                } else if (ly instanceof AVLayer && ly.source instanceof CompItem) {
+                    var inner = bcFindAudio(ly.source, 1);
+                    if (inner) {
+                        r = { path: inner.path, offset: ly.startTime + inner.offset * ly.stretch / 100,
+                              stretch: inner.stretch * ly.stretch / 100, name: ly.name + " > " + inner.name };
+                        note = "  [pre-comp: first audio layer only]";
+                    }
+                }
+                try { if (ly.canSetTimeRemapEnabled && ly.timeRemapEnabled) alert("This layer uses time remapping. Remapping is not applied, so caption timing may drift."); } catch (eT) { }
+            } else {
+                r = bcFindAudio(comp, 1);
+                if (r) note = "  [first audio layer of the composition]";
             }
-            BC.srcPath = ly.source.file.fsName;
-            BC.srcOffset = ly.startTime;
-            BC.srcStretch = ly.stretch;
-            ui.src.text = ly.name + "  (" + BC.srcPath + ")";
+            if (!r) { alert("No audio footage found. Select a footage layer with audio, or a pre-comp that contains one."); return; }
+            BC.srcPath = r.path; BC.srcOffset = r.offset; BC.srcStretch = r.stretch;
+            ui.src.text = r.name + note + "  (" + r.path + ")";
         };
 
         ui.btnBrowse.onClick = function () {
@@ -419,64 +495,80 @@ $.global.BC_poll = function () {
                 words.push({ t: banglish ? rw.r : rw.t, s: rw.s, e: rw.e });
             }
             n = parseInt(ui.maxWords.text, 10); if (isNaN(n) || n < 1) n = 5;
+            BC.curWords = words;
             BC.blocks = bcBuildBlocks(words, n, BC_PHRASE_GAP);
             var lines = [];
             for (i = 0; i < BC.blocks.length; i++) lines.push(BC.blocks[i].text);
             ui.editor.text = lines.join("\r\n");
-            ui.info.text = BC.blocks.length + " captions" + (BC.timing === "approx" ? " (estimated word timing)" : "") + ". One line = one caption.";
+            ui.info.text = BC.blocks.length + " captions" + (BC.timing === "approx" ? " (estimated word timing)" : "") + ". One line = one caption; merge or split freely.";
         };
 
-        ui.btnCreate.onClick = function () {
-            var comp = activeComp();
-            if (!comp) { alert("Open a composition first."); return; }
-            if (!BC.blocks || !BC.blocks.length) { alert("Generate a transcript first."); return; }
-            var lines = ui.editor.text.split(/\r\n|\r|\n/);
-            while (lines.length && bcTrim(lines[lines.length - 1]) === "") lines.pop();
-            if (lines.length !== BC.blocks.length) {
-                alert("The editor has " + lines.length + " lines but there are " + BC.blocks.length +
-                    " caption blocks.\nKeep one line per caption (edit the words, do not add or remove lines), or press Regroup to start over.");
-                return;
-            }
-            savePrefs();
+        function readStyle() {
             var fontName = bcTrim(ui.font.text);
             try {
                 if (app.fonts && app.fonts.getFontsByPostScriptName) {
                     var found = app.fonts.getFontsByPostScriptName(fontName);
                     if (!found || found.length === 0) {
-                        if (!confirm("Font '" + fontName + "' is not installed (PostScript name).\nContinue with the default font?")) return;
+                        if (!confirm("Font '" + fontName + "' is not installed (PostScript name).\nContinue with the default font?")) return null;
                         fontName = "";
                     }
                 }
             } catch (e) { }
             var size = parseFloat(ui.size.text); if (isNaN(size) || size < 1) size = 60;
             var yp = parseFloat(ui.ypos.text); if (isNaN(yp)) yp = 85;
-            var userOff = parseFloat(ui.offset.text); if (isNaN(userOff)) userOff = 0;
             var colors = [[1, 1, 1], [1, 0.9, 0.2], [0, 0, 0]];
-            var col = colors[ui.color.selection.index];
-            var made = 0, i, b, t0, t1, txt, ly, prop, td;
+            return { fontName: fontName, size: size, yp: yp, col: colors[ui.color.selection.index] };
+        }
 
+        function applyStyle(ly, st, comp) {
+            var prop = ly.property("ADBE Text Properties").property("ADBE Text Document");
+            var td = prop.value;
+            td.resetCharStyle();
+            td.fontSize = st.size;
+            td.fillColor = st.col;
+            td.applyFill = true;
+            td.applyStroke = false;
+            if (st.fontName) { try { td.font = st.fontName; } catch (e1) { } }
+            td.justification = ParagraphJustification.CENTER_JUSTIFY;
+            prop.setValue(td);
+            ly.property("ADBE Transform Group").property("ADBE Position").setValue([comp.width / 2, comp.height * st.yp / 100]);
+        }
+
+        ui.btnTest.onClick = function () {
+            var comp = activeComp();
+            if (!comp) { alert("Open a composition first."); return; }
+            var st = readStyle(); if (!st) return;
+            st.yp = 50;
+            app.beginUndoGroup("Bangla Caption test");
+            try {
+                var ly = comp.layers.addText("\u09AC\u09BE\u0982\u09B2\u09BE \u0995\u09CD\u09B7 \u09A4\u09CD\u09B0 \u09B6\u09CD\u09B0\u09C0 \u09B0\u09CD\u09AF\u09BE\u0999\u09CD\u0995");
+                applyStyle(ly, st, comp);
+                ly.name = "Bangla Caption - Bengali test (delete me)";
+            } catch (err) { alert("Test failed: " + err.toString()); } finally { app.endUndoGroup(); }
+            alert("A test layer was added. Check that conjuncts (ksha, tra, shri, rya) are joined, not broken into pieces.\nIf they look broken: Preferences > Type > Text Engine = South Asian and Middle Eastern, and use a Bengali font.");
+        };
+
+        ui.btnCreate.onClick = function () {
+            var comp = activeComp();
+            if (!comp) { alert("Open a composition first."); return; }
+            if (!BC.curWords || !BC.curWords.length) { alert("Generate a transcript first."); return; }
+            var blocks = bcLinesToBlocks(ui.editor.text.split(/\r\n|\r|\n/), BC.curWords);
+            if (!blocks.length) { alert("The caption editor is empty."); return; }
+            if (!blocks.exact && !confirm("The number of words changed, so caption timing will be estimated across the speech.\nContinue?")) return;
+            var st = readStyle(); if (!st) return;
+            var userOff = parseFloat(ui.offset.text); if (isNaN(userOff)) userOff = 0;
+            savePrefs();
+            var made = 0, i, b, t0, t1, ly;
             app.beginUndoGroup("Bangla Caption");
             try {
-                for (i = 0; i < BC.blocks.length; i++) {
-                    txt = bcTrim(lines[i]);
-                    if (!txt) continue;
-                    b = BC.blocks[i];
+                for (i = 0; i < blocks.length; i++) {
+                    b = blocks[i];
                     t0 = BC.srcOffset + userOff + b.s * BC.srcStretch / 100;
                     t1 = BC.srcOffset + userOff + b.e * BC.srcStretch / 100;
                     if (t0 >= comp.duration || t1 <= 0) continue;
                     if (t1 > comp.duration) t1 = comp.duration;
-                    ly = comp.layers.addText(txt);
-                    prop = ly.property("ADBE Text Properties").property("ADBE Text Document");
-                    td = prop.value;
-                    td.resetCharStyle();
-                    td.fontSize = size;
-                    td.fillColor = col;
-                    td.applyFill = true;
-                    td.applyStroke = false;
-                    if (fontName) { try { td.font = fontName; } catch (e1) { } }
-                    td.justification = ParagraphJustification.CENTER_JUSTIFY;
-                    prop.setValue(td);
-                    ly.property("ADBE Transform Group").property("ADBE Position").setValue([comp.width / 2, comp.height * yp / 100]);
+                    ly = comp.layers.addText(b.text);
+                    applyStyle(ly, st, comp);
                     ly.startTime = t0;
                     ly.outPoint = t1;
                     made++;
@@ -486,7 +578,7 @@ $.global.BC_poll = function () {
             } finally {
                 app.endUndoGroup();
             }
-            ui.status.text = "Created " + made + " text layers.";
+            ui.status.text = "Created " + made + " text layers" + (blocks.exact ? "." : " (timing estimated).");
         };
 
         BC.ui = ui;

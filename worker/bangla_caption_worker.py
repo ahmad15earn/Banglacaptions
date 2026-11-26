@@ -19,7 +19,9 @@ Usage (the panel does this for you):
 import argparse
 import json
 import os
+import re
 import shutil
+import subprocess
 import sys
 import time
 import traceback
@@ -171,22 +173,56 @@ def selftest():
     return ok
 
 
+def audio_duration(path):
+    """Seconds, parsed from 'ffmpeg -i' output; None if unknown."""
+    try:
+        out = subprocess.run(["ffmpeg", "-hide_banner", "-i", path], capture_output=True, text=True,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stderr
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", out)
+        if m:
+            return int(m.group(1)) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+    except Exception:
+        pass
+    return None
+
+
 def run_whisper(audio, model_name, prog):
     need_ffmpeg()
     prog.update(5, "Loading Whisper model '%s' (first run downloads it)..." % model_name)
     import whisper  # openai-whisper
     import torch
     model = whisper.load_model(model_name)
-    prog.update(20, "Transcribing with Whisper... (no live progress, please wait)")
-    result = model.transcribe(
-        audio,
-        language="bn",
-        task="transcribe",
-        word_timestamps=True,
-        condition_on_previous_text=False,
-        fp16=bool(torch.cuda.is_available()),
-        verbose=None,
-    )
+    prog.update(20, "Transcribing with Whisper...")
+
+    # live progress: wrap whisper's own tqdm bar
+    import tqdm
+    _orig = tqdm.tqdm
+
+    class _Bar(_orig):
+        def update(self, n=1):
+            r = super().update(n)
+            try:
+                tot = float(self.total or 0)
+                if tot:
+                    frac = min(1.0, self.n / tot)
+                    prog.update(min(95, int(20 + 75 * frac)), "Transcribing... %d%%" % int(frac * 100))
+            except Exception:
+                pass
+            return r
+
+    tqdm.tqdm = _Bar
+    try:
+        result = model.transcribe(
+            audio,
+            language="bn",
+            task="transcribe",
+            word_timestamps=True,
+            condition_on_previous_text=False,
+            fp16=bool(torch.cuda.is_available()),
+            verbose=False,
+        )
+    finally:
+        tqdm.tqdm = _orig
     words = []
     for seg in result.get("segments", []):
         for w in seg.get("words", []) or []:
@@ -201,10 +237,19 @@ def run_bs2t(audio, model_name, prog):
     prog.update(5, "Loading BanglaSpeech2Text model '%s' (first run downloads it)..." % model_name)
     from banglaspeech2text import Speech2Text
     stt = Speech2Text(model=model_name)
-    prog.update(20, "Transcribing with BanglaSpeech2Text... (no live progress, please wait)")
+    prog.update(20, "Transcribing with BanglaSpeech2Text...")
+    total = audio_duration(audio)
     segments = stt.recognize(audio, return_segments=True)
     words = []
     for sg in segments:
+        try:
+            if total:
+                frac = min(1.0, float(sg.end) / total)
+                prog.update(min(95, int(20 + 75 * frac)), "Transcribing... %d%%" % int(frac * 100))
+            else:
+                prog.update(50, "Transcribed up to %d s..." % int(float(sg.end)))
+        except Exception:
+            pass
         text = (sg.text or "").strip()
         parts = text.split()
         if not parts:
